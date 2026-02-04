@@ -1,4 +1,4 @@
---Version 3.3, released on December 17, 2025 by wookieejedi
+--Version 3.4, released on February 04, 2026 by wookieejedi
 --Requires FSO build of July 01, 2025 or newer
 --Description: custom sexps and functions that allow for much easier ship movements and rotations
 --Usage: custom sexps are included and listed in FRED under the LUA-Movements tab
@@ -17,7 +17,12 @@ Movements = {  --makes a global variable! This is the only global variable this 
 	--good for rotating so nose is always facing to object somewhat, such as guns being able to hit target engine 
 	--  if we are ever so slightly ahead of target then perhaps still match target so we can keep following them if they move forward
 	--  so only turn 180 if more ahead then just a tiny bit (ie within 179 degree cone instead of full 180 degrees)
-	SP_IsFacing_Angle = math.rad(179.9/2) --recall, is-facing function is half cone, so 180 would be full 360 
+	SP_IsFacing_Angle = math.rad(179.9/2), --recall, is-facing function is half cone, so 180 would be full 360 
+
+	SP_MatchTarget = 4,
+
+	default_angle_threshold = 0.001,
+	match_target_rotation_threshold = 0.02 --0.02 radians = 1.15 degrees
 }
 
 Movements.UseDebugMode = false 
@@ -383,7 +388,7 @@ Movements.UseDebugMode = false
 			--1 degree = 0.0174532925 rad
 			--0.5 degree = 0.00872665 rad
 			--0.25 degree = 0.004363323 rad
-		threshold = threshold or 0.0001
+		threshold = threshold or self.default_angle_threshold
 
 		local values_equal = true
 		for _, v in ipairs({"p", "b", "h"}) do
@@ -394,6 +399,16 @@ Movements.UseDebugMode = false
 		end
 
 		return values_equal
+
+	end
+
+	function Movements:GetTeamFamily(teamname)
+
+		if FotG ~= nil and string.filterInvisible ~= nil then
+			return string.filterInvisible(teamname)
+		else
+			return teamname
+		end
 
 	end
 
@@ -613,6 +628,10 @@ Movements.UseDebugMode = false
 				return {p = target_or.p, b = target_or.b, h = target_or.h}
 			end
 
+		end
+
+		if special_override_id == self.SP_MatchTarget then
+			return {p = target_or.p, b = target_or.b, h = target_or.h}
 		end
 
 		if special_override_id == -1 then
@@ -926,7 +945,8 @@ Movements.UseDebugMode = false
 		if ship_obj_type == "fighter" or ship_obj_type == "bomber" then return end
 
 		--big ship so add
-		self.Active_Big_Ships[ship.Name] = {activebig_signature = ship:getSignature(), activebig_team = ship.Team.Name}
+		local l_team = self:GetTeamFamily(ship.Team.Name)
+		self.Active_Big_Ships[ship.Name] = {activebig_signature = ship:getSignature(), activebig_team = l_team}
 
 	end
 
@@ -1409,6 +1429,11 @@ Movements.UseDebugMode = false
 			end_time = start_time + time_for_rotation
 		end
 
+		local bank_to_match
+		if type(options_table.SR_IN_only_match_bank) == "number" then
+			bank_to_match = options_table.SR_IN_only_match_bank --must be in radians
+		end
+
 		--add entry using ship name as key and update total number variable
 		local entry = {
 			SR_OUT_shipname = shipname, 
@@ -1420,7 +1445,8 @@ Movements.UseDebugMode = false
 			SR_OUT_play_dead_PR = play_dead_PR,
 			SR_OUT_isrotating = false,
 			SR_OUT_final_pbh_target_name = targetobject_name,
-			SR_OUT_final_pbh_override = special_override_final_pbh
+			SR_OUT_final_pbh_override = special_override_final_pbh,
+			SR_OUT_only_match_bank = bank_to_match
 		}
 
 		--remove any other active rotations for this ship
@@ -1485,8 +1511,15 @@ Movements.UseDebugMode = false
 
 					if using_ai_rotation then
 						--AI turn time (force min time have elapsed)
-						if v.SR_OUT_isrotating and self:All_PBH_Values_Within_Threshold(ship_ort, v.SR_OUT_FSO_orientation_final_updated) then
-							percent_done = 1.1 --bit hacky, but that's okay b/c with ai version we only use it to check if rotation is done
+						if v.SR_OUT_isrotating then
+							if self:All_PBH_Values_Within_Threshold(ship_ort, v.SR_OUT_FSO_orientation_final_updated) then
+								percent_done = 1.1 
+							elseif v.SR_OUT_only_match_bank ~= nil and self:Get_Distance_Angle(ship_ort.b, v.SR_OUT_only_match_bank) <= self.default_angle_threshold then
+								percent_done = 1.1 
+							else
+								percent_done = 0
+							end
+							--^^bit hacky, but that's okay b/c with ai version we only use it to check if rotation is done
 							--really this value is just to check to see if we should keep rotating per frame or not
 						else
 							percent_done = 0
@@ -1984,7 +2017,7 @@ Movements.UseDebugMode = false
 			--  since opposing team ships would be okay with risking a collision if line of sight was clear
 			if smart_stop_use_extra_check then
 				local my_signature = ship:getSignature()
-				local my_teamname = ship.Team.Name
+				local my_teamname = self:GetTeamFamily(ship.Team.Name)
 				local nose_tip_position = ship_pos + ship.Orientation:unrotateVector(ba.createVector(0, 0, myship_radius))
 				local mnships = mn.Ships
 				local tmatch = self.Extra_SmartStop_Uses_Team_Match
@@ -2037,6 +2070,7 @@ Movements.UseDebugMode = false
 		local smart_stop_ignore_radius = options_table.StW_IN_smart_stop_ignore_radius
 		local smart_stop_use_extra_check = options_table.StW_IN_smart_stop_use_extra_check
 		local waypoint_pause_triggered = options_table.StW_IN_waypoint_pause_triggered
+		local match_bank_always =  options_table.StW_IN_match_bank_always
 
 		if type(continuous_pbh_check) ~= "boolean" then
 			continuous_pbh_check = true
@@ -2158,6 +2192,10 @@ Movements.UseDebugMode = false
 			waypoint_pause_triggered = false
 		end
 
+		if type(match_bank_always) ~= "number" then
+			match_bank_always = nil 
+		end
+
 		--add entry using ship name as key and update total number variable
 		local entry = {
 			StW_OUT_shipname = shipname,
@@ -2182,7 +2220,8 @@ Movements.UseDebugMode = false
 			StW_OUT_current_wp_index = 1,
 			StW_OUT_smart_stop_blocking_obj_sig = -1,
 			StW_OUT_smart_stop_ignore_radius = smart_stop_ignore_radius, --only used if using smart stop,
-			StW_OUT_smart_stop_use_extra_check = smart_stop_use_extra_check
+			StW_OUT_smart_stop_use_extra_check = smart_stop_use_extra_check,
+			StW_OUT_match_bank_always = match_bank_always
 		}
 
 		--remove any other tracking of waypoints for this ship
@@ -2199,7 +2238,16 @@ Movements.UseDebugMode = false
 			if obstacle_in_path and blocking_obj ~= nil then
 				run_order = false
 				entry.StW_OUT_smart_stop_triggered = true
-				entry.StW_OUT_current_wp_index = ship:getWaypointIndex() or 1
+				local current_wp = 1
+				if num_waypoints > 1 then
+					current_wp = ship:getWaypointIndex()
+					if current_wp == nil then
+						current_wp = 1
+						ba.warning("ERROR MOVEMENTS waypoint is nil at checker 1A \n")
+					end
+					ba.print("MOVEMENTS current waypoint is "..tostring(current_wp).." at checker 1B \n")
+				end
+				entry.StW_OUT_current_wp_index = current_wp
 				entry.StW_OUT_smart_stop_blocking_obj_sig = blocking_obj:getSignature()
 				--if the obstacle ship is the target ship then the per simulation frame checks will take care of that
 			end
@@ -2340,7 +2388,8 @@ Movements.UseDebugMode = false
 		end
 
 		--if there is a target orientation and no active rotations then add a run rotation order
-			--recall that continuous checking of target pbh is done in ':Check_Ship_trk_Wpt()'
+		--  recall that continuous checking of target pbh is done in ':Check_Ship_trk_Wpt()'
+		--if not valid final orientation then don't run rotate-to-orientation
 		if self.Active_Rotations[shipname] == nil and self:PBHisValid(entry.StW_OUT_final_pbh_table) then
 
 			--early out if target ship is specified but not in mission
@@ -2367,7 +2416,6 @@ Movements.UseDebugMode = false
 			--so just add in the base pbh table as the input
 			self:Add_Rotation(shipname, entry.StW_OUT_final_pbh_table, input_tbl)
 
-		--if not valid final orientation then don't run rotate-to-orientation
 		end
 
 	end
@@ -2407,6 +2455,31 @@ Movements.UseDebugMode = false
 					local ship = mn.Ships[v.StW_OUT_shipname]
 
 					if wppath ~= nil and wppath:isValid() and ship ~= nil and ship:isValid() then
+
+						--recall, so far, any 'add-rotations' are within if checks (existing rotations == nil)...
+						--so can safely just add match bank up here, and
+						--  we do want to allow everything else to continue to work though, including smart stop, 
+						--  so do not return early
+						local match_bank = self.StW_OUT_match_bank_always
+						if match_bank ~= nil and self.Active_Rotations[v.StW_OUT_shipname] == nil then
+							local s_pbh = ship.Orientation
+							local s_pitch, s_bank, s_heading = s_pbh.p, s_pbh.b, s_pbh.h
+							if self:Get_Distance_Angle(s_bank, match_bank) > self.default_angle_threshold then
+								local input_tbl = {
+									SR_IN_time_delay = 0,
+									SR_IN_rotation_time = -1, --for default rotate time
+									SR_IN_play_dead_PR = -1,
+									SR_IN_final_pbh_target_name = nil,
+									SR_IN_final_pbh_special_override = nil,
+									SR_IN_requires_engines = true,
+									SR_IN_only_match_bank = 0 --must be in radians
+								}
+								--recall add rotation will create the final orientation once timer is triggered, 
+								--so just add in the base pbh table as the input
+								self:Add_Rotation(v.StW_OUT_shipname, {p=s_pitch, b=match_bank, h=s_heading}, input_tbl)
+							end
+						end
+
 						local lastwp = wppath[v.StW_OUT_num_waypoints]
 						if lastwp ~= nil and lastwp:isValid() then
 							--check if ship is currently following waypoint order or not
@@ -2421,15 +2494,23 @@ Movements.UseDebugMode = false
 									--ship currently moving -> do nothing
 									--ship not moving -> go and start moving again
 
-								local ship_currently_moving = not v.StW_OUT_smart_stop_triggered
 								local obstacle_in_path, intersecting_obj = self:Obstacle_In_Path(ship, v.StW_OUT_wp_pause_triggered, v.StW_OUT_uses_smart_stop, v.StW_OUT_smart_stop_ray_min, v.StW_OUT_smart_stop_ignore_radius, v.StW_OUT_track_interval, v.StW_OUT_ship_radius, v.StW_OUT_smart_stop_use_extra_check)
 
 								if obstacle_in_path and intersecting_obj ~= nil then  --found obstacle
-									if ship_currently_moving then
+									if not v.StW_OUT_smart_stop_triggered then
 										--stop ship
 										self:RemoveGoal_Correctly(ship, v.StW_OUT_priority, "ai-waypoints-once", v.StW_OUT_wp_path_name)
 										v.StW_OUT_smart_stop_triggered = true
-										v.StW_OUT_current_wp_index = ship:getWaypointIndex() or 1
+										local current_wp = 1
+										if v.StW_OUT_num_waypoints > 1 then
+											current_wp = ship:getWaypointIndex()
+											if current_wp == nil then
+												current_wp = 1
+												ba.warning("ERROR MOVEMENTS waypoint is nil at checker 2A \n")
+											end
+											ba.print("MOVEMENTS current waypoint is "..tostring(current_wp).." at checker 2B \n")
+										end
+										v.StW_OUT_current_wp_index = current_wp
 										v.StW_OUT_smart_stop_blocking_obj_sig = intersecting_obj:getSignature()
 									else --ship not moving
 										--what if the ship stopped b/c it got too close to it's final target? (ie final target is the obstacle)
@@ -2453,16 +2534,25 @@ Movements.UseDebugMode = false
 									end
 
 								else --no obstacles
-									if not ship_currently_moving then
+									if v.StW_OUT_smart_stop_triggered then
 										--start moving again
 										local wp_list = mn.WaypointLists[v.StW_OUT_wp_path_name]
-										if wp_list ~= nil and wp_list:isValid() then
+										if wp_list ~= nil and wp_list:isValid() and wp_list[1] ~= nil then
 											ship:giveOrder(ORDER_WAYPOINTS_ONCE, wp_list[1], nil, v.StW_OUT_priority/100)
+											v.StW_OUT_smart_stop_triggered = false
+											--do special things if this waypoint path has more then 1 point
+											if v.StW_OUT_num_waypoints > 1 then
+												local current_wp = v.StW_OUT_current_wp_index or 1
+												if current_wp > 1 then
+													--note, setting the wp index runs <maybe_start_waypoints> within FSO, 
+													--which we want to avoid if possible
+													ship.Orders[1].WaypointIndex = current_wp
+												end
+											end
+											v.StW_OUT_smart_stop_blocking_obj_sig = -1
 										end
-										v.StW_OUT_smart_stop_triggered = false
-										ship.Orders[1].WaypointIndex = v.StW_OUT_current_wp_index or 1
-										v.StW_OUT_smart_stop_blocking_obj_sig = -1
-									--else --ship is moving, and no obstacles so keep on doing what we are already doing
+									--else 
+										--ship is already moving, and no obstacles, so keep on doing what we are already doing
 									end
 
 								end
@@ -2514,14 +2604,16 @@ Movements.UseDebugMode = false
 
 										--start waypoints once
 										local wp_list = mn.WaypointLists[v.StW_OUT_wp_path_name]
-										if wp_list ~= nil and wp_list:isValid() then
+										if wp_list ~= nil and wp_list:isValid() and wp_list[1] ~= nil then
 											ship:giveOrder(ORDER_WAYPOINTS_ONCE, wp_list[1], nil, v.StW_OUT_priority/100)
 										end
 										v.StW_OUT_is_running_wp_once = true
 									end
 
 								else
+									--if waypoint is still nearby then make sure to check and run continuous pbh (assuming waypoit is not paused)
 									--recall the obstacle check used above internal has the 'check custom paused' check
+									--hence why we do not use that function in the above block
 									if not self:Get_Custom_Ship_PausedWaypoint(ship) then  
 										check_run_pbh = true
 									end
@@ -2537,11 +2629,19 @@ Movements.UseDebugMode = false
 									if v.StW_OUT_continuous_pbh_check and self.Active_Rotations[v.StW_OUT_shipname] == nil then
 
 										--only using 'get final PBH' to check if current and final orientations are equal or not
-										--recall that 'get final PBH' checks for validity 
+										--recall that 'get final PBH' checks for validity, so it is safe if pbh final input sections are nil
 										--PBH_table_final in {p=,b=,h=}
-										local fo = self:GetFinal_PBH(ship, v.StW_OUT_final_pbh_table, v.StW_OUT_final_pbh_target_name, v.StW_OUT_final_pbh_override) 
+										local f_tbl = v.StW_OUT_final_pbh_table or {}
+										local input_pbh_end = {p=f_tbl.p, b=f_tbl.b, h=f_tbl.h}
+										--if holding bank steady then that takes priority
+										if match_bank ~= nil then
+											input_pbh_end.b = match_bank
+										end
+										--now get final orientation
+										local fo = self:GetFinal_PBH(ship, input_pbh_end, v.StW_OUT_final_pbh_target_name, v.StW_OUT_final_pbh_override) 
 
-										if fo ~= nil and not self:All_PBH_Values_Within_Threshold(ship.Orientation, fo, 0.02) then --0.02 radians = 1.15 degrees
+
+										if fo ~= nil and not self:All_PBH_Values_Within_Threshold(ship.Orientation, fo, self.match_target_rotation_threshold) then
 											--orientations are not equal, so add rotation order
 											local input_tbl = {
 												SR_IN_time_delay = self:Time_Until_Stop(v.StW_OUT_shipname) * 1.5, --let On Waypoints Done rotation trigger first
@@ -2554,7 +2654,7 @@ Movements.UseDebugMode = false
 
 											--recall add rotation will create the final orientation once timer is triggered, 
 											--so just add in the base pbh table as the input
-											self:Add_Rotation(v.StW_OUT_shipname, v.StW_OUT_final_pbh_table, input_tbl)
+											self:Add_Rotation(v.StW_OUT_shipname, input_pbh_end, input_tbl)
 
 										end
 
