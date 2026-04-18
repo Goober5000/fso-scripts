@@ -193,7 +193,14 @@ function SaveState:GetShipData(shipname)
 				tt.Type = self:GetAIOrderFromEnum(order:getType())
 				ba.print("     Type: " .. tostring(tt.Type) .. "\n")
 				if (order:getType() == ORDER_WAYPOINTS) or (order:getType() == ORDER_WAYPOINTS_ONCE) then
-					--tt.Target = order.Target:getList().Name
+					if order.WaypointList and order.WaypointList:isValid() then
+						tt.WaypointList = order.WaypointList.Name
+						tt.WaypointIndex = order.WaypointIndex
+						tt.WaypointsInReverse = order.WaypointsInReverse
+						ba.print("     Waypoint List: " .. tostring(tt.WaypointList) .. "\n")
+						ba.print("     Waypoint Index: " .. tostring(tt.WaypointIndex) .. "\n")
+						ba.print("     Reverse: " .. tostring(tt.WaypointsInReverse) .. "\n")
+					end
 				else
 					if order.Target and order.Target:isValid() and order.Target:getBreedName() == "Ship" then
 						tt.Target = order.Target.Name
@@ -542,27 +549,44 @@ function SaveState:GiveOrders(ship,data)
 	
 	for i=1, #data.Orders do
 		ba.print("     Order " .. i .. ":")
-	
+
 		local thisOrder = data.Orders[i]
 		local order = self:GetAIOrderFromString(thisOrder.Type)
-		local targetShip
-		
-		if thisOrder.Target then
-			targetShip = mn.Ships[thisOrder.Target]
-		end
-		
-		local targetSubsystem = thisOrder.Subsystem
-		
-		ba.print(tostring(order) .. " Target: " .. tostring(targetShip) .. " Target Subsystem: " .. tostring(targetSubsystem) .. "\n")
-		
-		if order and targetShip and targetShip:isValid() then
-			if targetSubsystem then
-				ship:giveOrder(order, targetShip, targetShip[targetSubsystem], thisOrder.Priority)
-			else
-				ship:giveOrder(order, targetShip, nil, thisOrder.Priority)
+		local priority = (thisOrder.Priority or 0) / 100	-- because ship:giveOrder uses [0.0, 1.0] rather than [0, 100]
+
+		if order == ORDER_WAYPOINTS or order == ORDER_WAYPOINTS_ONCE then
+			local wpl = thisOrder.WaypointList and mn.WaypointLists[thisOrder.WaypointList]
+			if wpl and wpl:isValid() then
+				local wp = wpl[thisOrder.WaypointIndex]
+				if wp and wp:isValid() then
+					ba.print(tostring(order) .. " Waypoint List: " .. tostring(thisOrder.WaypointList) .. " Index: " .. tostring(thisOrder.WaypointIndex) .. "\n")
+					ship:giveOrder(order, wp, nil, priority)
+					if thisOrder.WaypointsInReverse then
+						local newOrder = ship.Orders[#ship.Orders]
+						if newOrder and newOrder:isValid() then
+							newOrder.WaypointsInReverse = true
+						end
+					end
+				end
+			end
+		else
+			local targetShip
+			if thisOrder.Target then
+				targetShip = mn.Ships[thisOrder.Target]
+			end
+			local targetSubsystem = thisOrder.Subsystem
+
+			ba.print(tostring(order) .. " Target: " .. tostring(targetShip) .. " Target Subsystem: " .. tostring(targetSubsystem) .. "\n")
+
+			if order and targetShip and targetShip:isValid() then
+				if targetSubsystem then
+					ship:giveOrder(order, targetShip, targetShip[targetSubsystem], priority)
+				else
+					ship:giveOrder(order, targetShip, nil, priority)
+				end
 			end
 		end
-		
+
 	end
 
 end
@@ -1002,11 +1026,9 @@ function SaveState:GetAIOrderFromString(order)
 	elseif order == "Undock" then
 		orderEnum = ORDER_UNDOCK
 	elseif order == "Waypoints" then
-		orderEnum = nil
-		--orderEnum = ORDER_WAYPOINTS
+		orderEnum = ORDER_WAYPOINTS
 	elseif order == "Waypoints Once" then
-		orderEnum = nil
-		--orderEnum = ORDER_WAYPOINTS_ONCE
+		orderEnum = ORDER_WAYPOINTS_ONCE
 	elseif order == "Attack Wing" then
 		orderEnum = ORDER_ATTACK_WING
 	elseif order == "Guard Wing" then
