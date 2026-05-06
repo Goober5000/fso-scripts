@@ -45,6 +45,10 @@ function TurretHotkey:Add(key, ship, subsystem, text)
 
 	self.Enabled = true
 
+	if type(subsystem) == "string" and ship:isValid() and ship[subsystem]:isValid() then
+		subsystem = ship[subsystem]
+	end
+
 	if ship:isValid() and subsystem:isValid() then
 
 		if not self.List[key] then
