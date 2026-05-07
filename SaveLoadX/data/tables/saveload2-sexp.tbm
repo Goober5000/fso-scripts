@@ -5,13 +5,13 @@ $Category: Change
 $Subcategory: Scripted
 $Minimum Arguments: 1
 $Return Type: Nothing
-$Description: Saves the state of all ships present in the mission at the time of calling this sexp. Save data can be loaded with lua-savestate-load. Data will be saved in an external JSON file with the filename "[PILOTNAME]_[MISSIONFILENAME].sav". Multiple save states can be saved into one file, use the save state index to decide which index to use. By default all ships are saved, but the list of ships and wings in the optional arguments will be excluded from being saved. (Note for ships in wings, both the ship name and wing name should be put in the exclusion list)
+$Description: Saves the state of all ships present in the mission at the time of calling this sexp. Save data can be loaded with lua-savestate-load. Data will be saved in an external JSON file with the filename "[PILOTNAME]_[MISSIONFILENAME].sav". Multiple save states can be saved into one file, use the save state index to decide which index to use. By default all ships are saved, but the list of ships and wings in the optional arguments will be excluded from being saved. (Note for ships in wings, both the ship name and wing name should be put in the exclusion list) All non-persistent mission variables are also saved$semicolon names in the exclusion list also exclude variables of the same name (ship, wing, and variable names share one exclusion namespace). Player-persistent and campaign-persistent variables are always skipped because FSO manages them across missions.
 $Parameter:
 	+Description: Save state index
 	+Type: number
 $Repeat
 $Parameter:
-	+Description: Name of ships and wings to exclude (Note for ships in wings, both the ship name and wing name should be put in the exclusion list)
+	+Description: Name of ships, wings, or variables to exclude (Note for ships in wings, both the ship name and wing name should be put in the exclusion list)
 	+Type: string
 
 $Operator: lua-savestate-load
@@ -20,7 +20,7 @@ $Subcategory: Scripted
 $Minimum Arguments: 1
 $Maximum Arguments: 1
 $Return Type: Nothing
-$Description: Loads the save state data into the current mission. Ships not present at start will have save data applied to their parse object data (where the game stores pre-arrival data). Ships present in the save state data but not present on load will automatically have their arrival info changed to warpless arrival, so the FREDder just needs to set up an arrival cue tied to the load data event for them to arrive right away. SPECIAL NOTES: Waypoint orders will be cleared. Wings may not be loaded 100% accurately, especially with waves.
+$Description: Loads the save state data into the current mission. Ships not present at start will have save data applied to their parse object data (where the game stores pre-arrival data). Ships present in the save state data but not present on load will automatically have their arrival info changed to warpless arrival, so the FREDder just needs to set up an arrival cue tied to the load data event for them to arrive right away. SPECIAL NOTES: Waypoint orders will be cleared. Wings may not be loaded 100% accurately, especially with waves. Mission variables saved in this slot are also restored$semicolon variables missing from the current mission or with a type that has changed since save are logged and skipped.
 $Parameter:
 	+Description: Save state index
 	+Type: number
@@ -30,7 +30,7 @@ $Category: Change
 $Subcategory: Scripted
 $Minimum Arguments: 3
 $Return Type: Nothing
-$Description: Loads the save state data from another mission's save state data into the current mission. Position, orientation and order information will not be loaded. This will only work if the ship is already present in the mission!
+$Description: Loads the save state data from another mission's save state data into the current mission. Position, orientation and order information will not be loaded. This will only work if the ship is already present in the mission! Mission variables are NOT loaded automatically across missions -- use lua-savestate-load-external-var to pull specific variables from another mission's save.
 $Parameter:
 	+Description: Save state index
 	+Type: number
@@ -41,7 +41,24 @@ $Repeat
 $Parameter:
 	+Description: Name of ships to load in
 	+Type: string
-	
+
+$Operator: lua-savestate-load-external-var
+$Category: Change
+$Subcategory: Scripted
+$Minimum Arguments: 3
+$Return Type: Nothing
+$Description: Loads specific mission variables from another mission's save state data into the current mission. Each listed variable will be looked up in the external save and assigned to the matching variable in the current mission. Variables missing from the external save, missing from the current mission, or with a type that does not match the saved value are logged and skipped. Persistent variables are not included in save data and cannot be loaded this way.
+$Parameter:
+	+Description: Save state index
+	+Type: number
+$Parameter:
+	+Description: Mission filename
+	+Type: string
+$Repeat
+$Parameter:
+	+Description: Name of variable to load
+	+Type: variable
+
 $Operator: lua-savestate-shipstatus
 $Category: Status
 $Subcategory: Mission

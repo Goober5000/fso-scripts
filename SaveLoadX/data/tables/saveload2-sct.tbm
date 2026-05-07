@@ -381,6 +381,56 @@ function SaveState:CheckList(t, data)
 
 end
 
+function SaveState:GetVariableData(exclusionList)
+
+	ba.print("SAVELOAD: Getting mission variables...\n")
+
+	local t = {}
+
+	for i = 1, #mn.SEXPVariables do
+		local var = mn.SEXPVariables[i]
+		if var and var:isValid() then
+			if var.Persistence == SEXPVAR_NOT_PERSISTENT and not self:CheckList(exclusionList, var.Name) then
+				local typeStr
+				if var.Type == SEXPVAR_TYPE_NUMBER then typeStr = "number"
+				elseif var.Type == SEXPVAR_TYPE_STRING then typeStr = "string" end
+				if typeStr then
+					t[var.Name] = { Type = typeStr, Value = var.Value }
+					ba.print("SAVELOAD: Saved variable " .. var.Name .. " (" .. typeStr .. ") = " .. tostring(var.Value) .. "\n")
+				end
+			end
+		end
+	end
+
+	return t
+
+end
+
+function SaveState:ApplyVariableData(varTable)
+
+	if not varTable then return end
+
+	ba.print("SAVELOAD: Applying mission variables...\n")
+
+	for name, entry in pairs(varTable) do
+		local var = mn.SEXPVariables[name]
+		if var and var:isValid() then
+			local currentType
+			if var.Type == SEXPVAR_TYPE_NUMBER then currentType = "number"
+			elseif var.Type == SEXPVAR_TYPE_STRING then currentType = "string" end
+			if currentType ~= entry.Type then
+				ba.print("SAVELOAD: Variable " .. name .. " type mismatch (saved " .. tostring(entry.Type) .. ", current " .. tostring(currentType) .. "), skipping\n")
+			else
+				var.Value = entry.Value
+				ba.print("SAVELOAD: Restored variable " .. name .. " = " .. tostring(entry.Value) .. "\n")
+			end
+		else
+			ba.print("SAVELOAD: Variable " .. name .. " no longer exists, skipping\n")
+		end
+	end
+
+end
+
  --This is what lua-savestate-save calls
  --We go through THE LIST and nab all of the ship data which will go into self.LoadedData which is what will get saved.
  --We use the ship name as a key for the data table for ease of retrival and checking later. This might take a bit more CPU time, but we can probably spare it.
@@ -407,14 +457,16 @@ function SaveState:SaveAll(index, ...)
 	end
 	
 	data.Wings = {}
-	
+
 	for i, entry in ipairs(self.WingList) do
 		if not self:CheckList(exclusionList,entry) then
 			wingdata,key = self:GetWingData(entry)
 			data.Wings[key] = wingdata
 		end
 	end
-	
+
+	data.Variables = self:GetVariableData(exclusionList)
+
 	self.LoadedData[index or #self.LoadedData+1] = data
 
 	ba.print("SAVELOAD: Writing save data to file " .. self.SaveFilename .. " with save index " .. index .. "\n")
@@ -443,7 +495,11 @@ function SaveState:LoadAll(index)
 		ba.print("SAVE STATE: index " .. self.CurrentIndex .. " not found, aborting load data.\n")
 		return
 	end
-	
+
+	--Restore mission variables before touching ships, so any SEXP evaluation
+	--triggered by ship-apply code sees the correct variable values.
+	self:ApplyVariableData(thisloadeddata.Variables)
+
 	--Apply saved data to ships that are present
 	
 	for thisShip in mn.getShipList() do
@@ -1028,7 +1084,37 @@ function SaveState:ExternalLoad(index, mission, ...)
 	end
 	
 	ba.print("SAVELOAD: Finished External Load!\n")
-	
+
+end
+
+function SaveState:ExternalLoadVar(index, mission, ...)
+
+	ba.print("SAVELOAD: Beginning External Variable Load!\n")
+
+	if mission ~= self.ExternalMission then self:LoadExternalData(mission) end
+
+	local data = self.ExternalData
+
+	if data and data[index] and data[index].Variables then
+
+		local saveData = data[index].Variables
+		local requested = {}
+
+		for i, v in ipairs(arg) do
+			local varname = v[1].Name
+			ba.print("SAVELOAD: Requesting external variable " .. varname .. "\n")
+			if saveData[varname] then
+				requested[varname] = saveData[varname]
+			else
+				ba.print("SAVELOAD: Variable " .. varname .. " not found in external save, skipping\n")
+			end
+		end
+
+		self:ApplyVariableData(requested)
+	end
+
+	ba.print("SAVELOAD: Finished External Variable Load!\n")
+
 end
 
 function SaveState:LoadExternalData(mission)
@@ -1150,6 +1236,7 @@ end
 mn.LuaSEXPs["lua-savestate-save"].Action = function(index, ...) SaveState:SaveAll(index, ...) end
 mn.LuaSEXPs["lua-savestate-load"].Action = function(index) SaveState:LoadAll(index) end
 mn.LuaSEXPs["lua-savestate-load-external"].Action = function(index, mission, ...) return SaveState:ExternalLoad(index, mission, ...) end
+mn.LuaSEXPs["lua-savestate-load-external-var"].Action = function(index, mission, ...) SaveState:ExternalLoadVar(index, mission, ...) end
 mn.LuaSEXPs["lua-savestate-shipstatus"].Action = function(name, index) return SaveState:QueryStatus(name, index) end
 mn.LuaSEXPs["lua-savestate-getindex"].Action = function() return SaveState:GetCurrentSaveIndex() end
 mn.LuaSEXPs["lua-savestate-check"].Action = function(index, mission) return SaveState:Exists(index, mission) end
