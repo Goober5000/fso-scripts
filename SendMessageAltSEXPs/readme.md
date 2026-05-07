@@ -1,4 +1,7 @@
 
+> [!WARNING]
+> A newer and supported version of this script can be obtained from the latest release of Between the Ashes
+
 # Send Message Alt Sexps
 This adds several sexps to make sending messages half the chore they used to be while adding a host of features to make the whole messaging system many times more powerful. The core of what they can do can be distilled down into two main things. 1) It gets most of the message data from the message itself, so send-message-list-alt takes only two arguments per message rather than four. 2) It has built-in operators to choose between messages based on the ship being present and/or other conditions you may want to set.
 
