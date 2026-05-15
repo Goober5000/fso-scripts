@@ -1,4 +1,7 @@
 
+> [!WARNING]
+> A newer and supported version of this script can be obtained from the latest release of Between the Ashes
+
 # Mainhall Notifications
 Provides a system and sexps to offer custom popup notifications at the mainhall between missions or at the start of a campaign. Notifications that have been seen are saved to a player file in %appdata%.
 

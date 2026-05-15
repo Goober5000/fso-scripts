@@ -1,4 +1,7 @@
 
+> [!WARNING]
+> A newer and supported version of this script can be obtained from the latest release of Between the Ashes
+
 # In Mission Jump Multi SEXPs
 These sexps are for doing in-mission jumps for one or more ships simultaneously. For player ships, they will perform all the associated effects for a jump including the warp effect and the subspace tunnel. For non player ships, they will perform warp outs, move the ships far away and set them as untargetable, and then return them at the appropriate time with a warp effect.
 
