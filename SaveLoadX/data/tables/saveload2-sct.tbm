@@ -38,7 +38,7 @@ function SaveState:Init()
 	if cf.fileExists(self.SaveFilename, "data/config") then
 		local loaded = axemParse:ReadJSON(self.SaveFilename, "data/config")
 		if type(loaded) == "table" then
-			self.LoadedData = loaded
+			self.LoadedData = self:NormalizeSlots(loaded)
 		else
 			ba.print("SAVELOAD: Save file " .. self.SaveFilename .. " could not be parsed, starting with no save data\n")
 		end
@@ -126,7 +126,7 @@ function SaveState:CheckLateData(ship)
 	
 	for i=1, #self.CuedList do
 		if self.CuedList[i] and self.CuedList[i] == thisShipName then
-			local thisloadeddata = self.LoadedData[self.CurrentIndex]
+			local thisloadeddata = self.LoadedData[self:SlotKey(self.CurrentIndex)]
 			if type(thisloadeddata) ~= "table" then
 				ba.print("SAVELOAD: save state " .. tostring(self.CurrentIndex) .. " no longer present, no late data for " .. thisShipName .. "\n")
 				return
@@ -466,6 +466,31 @@ function SaveState:HandleIsValid(h)
 
 end
 
+--Save slots are keyed by string. dkjson writes a Lua table as a JSON array only when its keys are dense, so a lone
+--numeric slot above 10 used to be written as an object with a string key and never found again by a numeric lookup.
+function SaveState:SlotKey(index)
+
+	if index == nil then return nil end
+
+	return tostring(index)
+
+end
+
+--Converts every top-level key to a string so a legacy array-shaped file and a new object-shaped file look the same.
+function SaveState:NormalizeSlots(t)
+
+	local out = {}
+
+	if type(t) ~= "table" then return out end
+
+	for k, v in pairs(t) do
+		out[tostring(k)] = v
+	end
+
+	return out
+
+end
+
 --Ensures the sub-tables every apply path indexes into exist, so a save written by an older version, an external
 --load, or a hand-edited file cannot cause a nil index. Existing content is left untouched.
 function SaveState:SanitizeShipData(data)
@@ -625,7 +650,18 @@ function SaveState:SaveAll(index, ...)
 
 	data.Variables = self:GetVariableData(exclusionList)
 
-	local slot = index or (#self.LoadedData + 1)
+	local slot
+	if index ~= nil then
+		slot = self:SlotKey(index)
+	else
+		--lua-savestate-save requires an index, so this is only a fallback: next free numeric slot
+		local highest = 0
+		for k in pairs(self.LoadedData) do
+			local n = tonumber(k)
+			if n and n > highest then highest = n end
+		end
+		slot = self:SlotKey(highest + 1)
+	end
 	self.LoadedData[slot] = data
 
 	ba.print("SAVELOAD: Writing save data to file " .. self.SaveFilename .. " with save index " .. tostring(slot) .. "\n")
@@ -646,7 +682,7 @@ function SaveState:LoadAll(index)
 		return
 	end
 
-	local thisloadeddata = self.LoadedData[index]
+	local thisloadeddata = self.LoadedData[self:SlotKey(index)]
 
 	if type(thisloadeddata) ~= "table" then
 		ba.print("SAVE STATE: index " .. tostring(index) .. " not found, aborting load data.\n")
@@ -1298,7 +1334,7 @@ function SaveState:QueryStatus(object, index)
 		return true
 	end
 
-	local slotkey = index or self.CurrentIndex
+	local slotkey = self:SlotKey(index or self.CurrentIndex)
 	local slot = self.LoadedData[slotkey]
 
 	if type(slot) ~= "table" then
@@ -1347,10 +1383,11 @@ function SaveState:ExternalLoad(index, mission, ...)
 	if self:NormalizeMissionName(mission) ~= self.ExternalMission then self:LoadExternalData(mission) end
 
 	local data = self.ExternalData
-	
-	if data and data[index] then
-	
-		local saveData = data[index]
+	local key = self:SlotKey(index)
+
+	if data and key and type(data[key]) == "table" then
+
+		local saveData = data[key]
 	
 		for i, v in ipairs(arg) do
 			local shipname = v[1]
@@ -1383,10 +1420,11 @@ function SaveState:ExternalLoadVar(index, mission, ...)
 	if self:NormalizeMissionName(mission) ~= self.ExternalMission then self:LoadExternalData(mission) end
 
 	local data = self.ExternalData
+	local key = self:SlotKey(index)
 
-	if data and data[index] and data[index].Variables then
+	if data and key and type(data[key]) == "table" and type(data[key].Variables) == "table" then
 
-		local saveData = data[index].Variables
+		local saveData = data[key].Variables
 		local requested = {}
 
 		for i, v in ipairs(arg) do
@@ -1421,7 +1459,7 @@ function SaveState:LoadExternalData(mission)
 		ba.print("SAVELOAD: External save file " .. tempmissionfilename .. " could not be parsed, treating as empty\n")
 		loaded = {}
 	end
-	self.ExternalData = loaded
+	self.ExternalData = self:NormalizeSlots(loaded)
 
 end
 
@@ -1439,13 +1477,13 @@ function SaveState:Exists(index, mission)
 		data = self.ExternalData
 	end
 	
-	if data then
+	if type(data) == "table" then
 		if not index then
-			if #data > 0 then
+			if next(data) ~= nil then
 				return true
 			end
 		else
-			if data[index] then
+			if type(data[self:SlotKey(index)]) == "table" then
 				return true
 			end
 		end
@@ -1501,7 +1539,7 @@ function SaveState:Clear(index)
 		self.LoadedData = {}
 		cf.deleteFile(self.SaveFilename, "data/config")
 	else
-		self.LoadedData[index] = nil
+		self.LoadedData[self:SlotKey(index)] = nil
 		axemParse:WriteJSON(self.LoadedData, self.SaveFilename, "data/config")
 	end
 
