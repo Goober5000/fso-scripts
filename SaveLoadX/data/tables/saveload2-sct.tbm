@@ -266,11 +266,15 @@ function SaveState:GetShipData(shipname)
 				
 					local thisSubsys = ship[i]
 					local ss = {}
-					
-					ba.print("        Subsystem Name: " .. tostring(thisSubsys:getModelName()) .. "\n")
-					
+
+					--Canonical name, so the entry can be matched by name on load rather than by position
+					ss.Name = thisSubsys:getModelName()
+					ba.print("        Subsystem Name: " .. tostring(ss.Name) .. "\n")
+
 					if thisSubsys.HitpointsMax > 0 then
-						ss.HP = math.floor((thisSubsys.HitpointsLeft / thisSubsys.HitpointsMax) * 100)
+						--Round up, not down: a saved 0 now means "destroyed" on load, so a subsystem that is merely
+						--almost dead must not be recorded as 0.  One at exactly 0 hitpoints still reads as 0.
+						ss.HP = math.ceil((thisSubsys.HitpointsLeft / thisSubsys.HitpointsMax) * 100)
 					else
 						ss.HP = 0
 					end
@@ -491,24 +495,8 @@ function SaveState:NormalizeSlots(t)
 
 end
 
---Ensures the sub-tables every apply path indexes into exist, so a save written by an older version, an external
---load, or a hand-edited file cannot cause a nil index. Existing content is left untouched.
-function SaveState:SanitizeShipData(data)
-
-	if type(data) ~= "table" then return data end
-
-	if type(data.PBanks) ~= "table" then data.PBanks = {} end
-	if type(data.SBanks) ~= "table" then data.SBanks = {} end
-	if type(data.Subsystems) ~= "table" then data.Subsystems = {} end
-	if type(data.Orders) ~= "table" then data.Orders = {} end
-	if type(data.Flags) ~= "table" then data.Flags = {} end
-
-	return data
-
-end
-
 --Applies a saved bank array to a parse object's MainStatus, which holds weapon classes and ammo in parallel arrays
---rather than as bank handles. The primary and secondary cases are identical apart from which arrays they read.
+--rather than as bank handles, so it cannot share ApplyBankArray.
 function SaveState:ApplyParseBankArray(banks, ammo, saved, shipname, label)
 
 	if not banks then return end
@@ -538,6 +526,44 @@ function SaveState:ApplyParseBankArray(banks, ammo, saved, shipname, label)
 
 end
 
+--Sets the ship flags recorded in the save. The saved list is positional against self.ShipFlags.
+function SaveState:ApplyShipFlags(ship, data)
+
+	if type(data.Flags) ~= "table" then return end
+
+	for i=1, #self.ShipFlags do
+		if data.Flags[i] then
+			local sexpstring = "(alter-ship-flag !" .. self.ShipFlags[i] .. "! (true) (true) !" .. ship.Name .. "! )"
+			ba.print(sexpstring .. "\n")
+			mn.runSEXP(sexpstring)
+		end
+	end
+
+end
+
+--Applies a saved bank array to a live weaponbanktype, for the ship's own banks and for a turret's.
+--warnOnCount is for callers whose saved array is dense; a sparse one (turret banks) would warn every time.
+function SaveState:ApplyBankArray(banktype, saved, shipname, label, warnOnCount)
+
+	if not banktype or not banktype:isValid() then return end
+
+	if type(saved) ~= "table" then saved = {} end
+
+	local n = #banktype
+	ba.print("     " .. label .. "s: " .. n .. "\n")
+
+	if warnOnCount and #saved ~= n then
+		ba.print("SAVELOAD: " .. shipname .. ": saved " .. label .. " count " .. #saved .. " does not match current count " .. n .. ", applying what matches\n")
+	end
+
+	for i=1, n do
+		if type(saved[i]) == "table" then
+			self:ApplyBankData(banktype[i], saved[i], shipname, label .. " " .. i)
+		end
+	end
+
+end
+
 --Applies one saved weapon bank entry to a live weaponbank handle.
 function SaveState:ApplyBankData(bank, bdata, shipname, where)
 
@@ -554,6 +580,118 @@ function SaveState:ApplyBankData(bank, bdata, shipname, where)
 		bank.AmmoLeft = (self:GetAmmo(bdata.AmmoLeft, shipname) / 100) * bank.AmmoMax
 		ba.print("          Ammo: " .. tostring(bank.AmmoLeft) .. "\n")
 	end
+
+end
+
+--Applies saved subsystem data (hitpoints, armor, turret lock, turret banks) to a live ship. Entries are matched by
+--canonical subsystem name; saves written before names were recorded fall back to position. Shared by ApplyData
+--(ships present at load time) and ApplyLateData (ships that arrive after the load), so a not-yet-arrived ship no
+--longer depends on the parse object's sparse, FRED-ordered subsystem list.
+function SaveState:ApplySubsystemData(ship, data, shipname)
+
+	local numSubsys = #ship
+	if numSubsys <= 0 then return end
+
+	local saved = data.Subsystems
+	if type(saved) ~= "table" then saved = {} end
+
+	local savedByName = {}
+	local namedCount = 0
+	for _, entry in ipairs(saved) do
+		if type(entry) == "table" and type(entry.Name) == "string" then
+			local key = entry.Name:lower()
+			if savedByName[key] then
+				ba.print("SAVELOAD: " .. shipname .. ": saved subsystem name '" .. entry.Name .. "' appears more than once, keeping the first\n")
+			else
+				savedByName[key] = entry
+				namedCount = namedCount + 1
+			end
+		end
+	end
+
+	local legacy = (namedCount == 0 and #saved > 0)
+	if legacy then
+		ba.print("SAVELOAD: " .. shipname .. ": save has no subsystem names, matching by position\n")
+	end
+
+	if #saved ~= numSubsys then
+		ba.print("SAVELOAD: " .. shipname .. ": saved subsystem count " .. #saved .. " does not match current count " .. numSubsys .. ", applying what matches\n")
+	end
+
+	local matched = {}
+
+	for i=1, numSubsys do
+		local thisSubsys = ship[i]
+
+		if not thisSubsys or not thisSubsys:isValid() then
+			ba.print("       Subsystem " .. i .. " - invalid handle, skipping\n")
+		else
+			local subsysName = thisSubsys:getModelName()
+			local ssdata
+			if legacy then
+				ssdata = saved[i]
+			else
+				ssdata = savedByName[subsysName:lower()]
+				if ssdata then matched[subsysName:lower()] = true end
+			end
+
+			if type(ssdata) ~= "table" then
+				ba.print("       Subsystem " .. i .. " - " .. subsysName .. " - no saved data, skipping\n")
+			else
+				ba.print("       Subsystem " .. i .. " - " .. subsysName .. "\n")
+
+				if ssdata.HP ~= nil and thisSubsys.HitpointsMax > 0 then
+					if ssdata.HP <= 0 then
+						--Neither hitpoints value is right here: setting HitpointsLeft to 0 only disables the
+						--subsystem, and -1 or lower blows it up with debris and effects.  Use the SEXP instead.
+						ba.print("      Destroyed\n")
+						mn.runSEXP("(destroy-subsys-instantly !" .. ship.Name .. "! !" .. subsysName .. "!)")
+					else
+						ba.print("      HP Left: " .. tostring((ssdata.HP / 100) * thisSubsys.HitpointsMax) .. "\n")
+						thisSubsys.HitpointsLeft = (ssdata.HP / 100) * thisSubsys.HitpointsMax
+					end
+				end
+
+				if ssdata.Armor then
+					ba.print("      Armor Class: " .. tostring(ssdata.Armor) .. "\n")
+					thisSubsys.ArmorClass = ssdata.Armor
+				end
+
+				if thisSubsys:isTurret() then
+
+					ba.print("      This is a turret!\n")
+
+					if ssdata.TurretLocked ~= nil then
+						ba.print("        Locked: " .. tostring(ssdata.TurretLocked) .. "\n")
+						thisSubsys.TurretLocked = ssdata.TurretLocked
+					end
+
+					--No count warning for turrets: GetShipData only records turret banks that carry ammo, so the
+					--saved array is deliberately sparse and comparing lengths would warn on every load.
+					self:ApplyBankArray(thisSubsys.PrimaryBanks, ssdata.PBanks, shipname, subsysName .. " primary bank")
+					self:ApplyBankArray(thisSubsys.SecondaryBanks, ssdata.SBanks, shipname, subsysName .. " secondary bank")
+				end
+			end
+		end
+	end
+
+	if not legacy then
+		for key, entry in pairs(savedByName) do
+			if not matched[key] then
+				ba.print("SAVELOAD: " .. shipname .. ": saved subsystem '" .. entry.Name .. "' is not on the ship, skipping\n")
+			end
+		end
+	end
+
+end
+
+--Applies the ship's own primary and secondary bank data. Shared by ApplyData and ApplyLateData; the latter covers
+--ships whose parse object had no MainStatus (no loadout change in FRED), which the parse-side path cannot restore.
+--The ship's own bank arrays are recorded densely, so a count mismatch is worth reporting here.
+function SaveState:ApplyShipBankData(ship, data, shipname)
+
+	self:ApplyBankArray(ship.PrimaryBanks, data.PBanks, shipname, "primary bank", true)
+	self:ApplyBankArray(ship.SecondaryBanks, data.SBanks, shipname, "secondary bank", true)
 
 end
 
@@ -806,7 +944,6 @@ function SaveState:ApplyData(ship,data,external)
 
 	ba.print("SAVELOAD: Applying data to " .. ship.Name .. "\n")
 
-	self:SanitizeShipData(data)
 	local shipname = data.Name or ship.Name
 
 	--Compare against the resolved handle's own name, not the saved string: the engine matches class names
@@ -853,13 +990,7 @@ function SaveState:ApplyData(ship,data,external)
 	end
 
 	ba.print("     Applying Ship Flags...\n")
-	for i=1, #self.ShipFlags do
-		if data.Flags[i] then
-			local sexpstring = "(alter-ship-flag !" .. self.ShipFlags[i] .. "! (true) (true) !" .. ship.Name .. "! )"
-			ba.print(sexpstring .. "\n")
-			mn.runSEXP(sexpstring)
-		end
-	end
+	self:ApplyShipFlags(ship, data)
 
 	if data.Countermeasures ~= nil then
 		ba.print("    Applying Countermeasures: " .. tostring(data.Countermeasures) .. "\n")
@@ -867,99 +998,10 @@ function SaveState:ApplyData(ship,data,external)
 	end
 
 	ba.print("    Applying Subsystem data...\n")
-
-	local numSubsys = #ship
-
-	if numSubsys > 0 then
-
-		if #data.Subsystems ~= numSubsys then
-			ba.print("SAVELOAD: " .. shipname .. ": saved subsystem count " .. #data.Subsystems .. " does not match current count " .. numSubsys .. ", applying what matches\n")
-		end
-
-		for i=1, numSubsys do
-			local thisSubsys = ship[i]
-			local ssdata = data.Subsystems[i]
-
-			if not thisSubsys or not thisSubsys:isValid() then
-				ba.print("       Subsystem " .. i .. " - invalid handle, skipping\n")
-			elseif type(ssdata) ~= "table" then
-				ba.print("       Subsystem " .. i .. " - " .. thisSubsys:getModelName() .. " - no saved data, skipping\n")
-			else
-				ba.print("       Subsystem " .. i .. " - " .. thisSubsys:getModelName() .. "\n")
-
-				if ssdata.HP then
-					ba.print("      HP Left: " .. tostring((ssdata.HP / 100) * thisSubsys.HitpointsMax) .. "\n")
-					thisSubsys.HitpointsLeft = (ssdata.HP / 100) * thisSubsys.HitpointsMax
-				end
-
-				if ssdata.Armor then
-					ba.print("      Armor Class: " .. tostring(ssdata.Armor) .. "\n")
-					thisSubsys.ArmorClass = ssdata.Armor
-				end
-
-				if thisSubsys:isTurret() then
-
-					ba.print("      This is a turret!\n")
-
-					if ssdata.TurretLocked ~= nil then
-						ba.print("        Locked: " .. tostring(ssdata.TurretLocked) .. "\n")
-						thisSubsys.TurretLocked = ssdata.TurretLocked
-					end
-
-					if thisSubsys.PrimaryBanks and thisSubsys.PrimaryBanks:isValid() then
-						ba.print("        Has primary banks...\n")
-						for j=1, #thisSubsys.PrimaryBanks do
-							local bdata = type(ssdata.PBanks) == "table" and ssdata.PBanks[j]
-							if bdata then
-								self:ApplyBankData(thisSubsys.PrimaryBanks[j], bdata, shipname, thisSubsys:getModelName() .. " primary bank " .. j)
-							end
-						end
-					end
-
-					if thisSubsys.SecondaryBanks and thisSubsys.SecondaryBanks:isValid() then
-						ba.print("        Has secondary banks...\n")
-						for j=1, #thisSubsys.SecondaryBanks do
-							local bdata = type(ssdata.SBanks) == "table" and ssdata.SBanks[j]
-							if bdata then
-								self:ApplyBankData(thisSubsys.SecondaryBanks[j], bdata, shipname, thisSubsys:getModelName() .. " secondary bank " .. j)
-							end
-						end
-					end
-				end
-			end
-
-		end
-	end
+	self:ApplySubsystemData(ship, data, shipname)
 
 	ba.print("    Applying Weapon Bank data...\n")
-
-	if ship.PrimaryBanks and ship.PrimaryBanks:isValid() then
-		ba.print("     Has primary banks...\n")
-		local n = #ship.PrimaryBanks
-		if #data.PBanks ~= n then
-			ba.print("SAVELOAD: " .. shipname .. ": saved primary bank count " .. #data.PBanks .. " does not match current count " .. n .. ", applying what matches\n")
-		end
-		for i=1, n do
-			local bdata = data.PBanks[i]
-			if type(bdata) == "table" then
-				self:ApplyBankData(ship.PrimaryBanks[i], bdata, shipname, "primary bank " .. i)
-			end
-		end
-	end
-
-	if ship.SecondaryBanks and ship.SecondaryBanks:isValid() then
-		ba.print("     Has secondary banks...\n")
-		local n = #ship.SecondaryBanks
-		if #data.SBanks ~= n then
-			ba.print("SAVELOAD: " .. shipname .. ": saved secondary bank count " .. #data.SBanks .. " does not match current count " .. n .. ", applying what matches\n")
-		end
-		for i=1, n do
-			local bdata = data.SBanks[i]
-			if type(bdata) == "table" then
-				self:ApplyBankData(ship.SecondaryBanks[i], bdata, shipname, "secondary bank " .. i)
-			end
-		end
-	end
+	self:ApplyShipBankData(ship, data, shipname)
 
 	if ship == hv.Player then
 
@@ -1016,7 +1058,6 @@ function SaveState:ApplyParseData(ship,data)
 
 	ba.print("SAVELOAD: Applying parse data to " .. ship.Name .. "\n")
 
-	self:SanitizeShipData(data)
 	local shipname = data.Name or ship.Name
 
 	--Set the ship to arrive by hyperspace without warp-in to save the FREDder from having to do that
@@ -1047,64 +1088,16 @@ function SaveState:ApplyParseData(ship,data)
 	local mainStatus = ship.MainStatus
 
 	if not self:HandleIsValid(mainStatus) then
-		ba.print("    MainStatus handle not valid, skipping weapon bank setup\n")
+		ba.print("    MainStatus handle not valid (no loadout change in FRED); weapon banks will be applied on arrival\n")
 	else
 		self:ApplyParseBankArray(mainStatus.PrimaryBanks, mainStatus.PrimaryAmmo, data.PBanks, shipname, "primary bank")
 		self:ApplyParseBankArray(mainStatus.SecondaryBanks, mainStatus.SecondaryAmmo, data.SBanks, shipname, "secondary bank")
 	end
 
-	ba.print("    Done with weapons...\n    Beginning Subsystem Damage...\n")
-
-	for i,subsys in ipairs(ship.Subsystems) do
-
-		local ssdata = data.Subsystems[i]
-
-		if not self:HandleIsValid(subsys) then
-			ba.print("    Subsystem Index: " .. i .. " - invalid handle, skipping\n")
-		elseif type(ssdata) ~= "table" then
-			ba.print("    Subsystem Index: " .. i .. " - " .. tostring(subsys.Name) .. " - no saved data, skipping\n")
-		else
-			ba.print("    Subsystem Index: " .. i .. " - " .. tostring(subsys.Name) .. "\n")
-
-			if ssdata.HP then
-				subsys.Damage = 100 - ssdata.HP --We record the health in the save data, but the subsystem uses damage (silly Volition)
-				ba.print("    Subsystem Damage: " .. subsys.Damage .. "\n")
-			end
-
-			ba.print("      Turret Bank Info:\n")
-
-			if subsys.PrimaryBanks and type(ssdata.PBanks) == "table" then
-				ba.print("       Primary Banks:\n")
-				for j, pbank in ipairs(ssdata.PBanks) do
-					ba.print("         Bank: " .. j .. "\n")
-					if type(pbank) == "table" and subsys.PrimaryBanks[j] then
-						local wclass = self:ResolveWeaponClass(pbank.Class, shipname, tostring(subsys.Name) .. " primary bank " .. j)
-						if wclass then
-							subsys.PrimaryBanks[j] = wclass
-							ba.print("         Class: " .. tostring(pbank.Class) .. "\n")
-						end
-						if pbank.AmmoLeft and subsys.PrimaryAmmo then subsys.PrimaryAmmo[j] = self:GetAmmo(pbank.AmmoLeft,shipname) end
-					end
-				end
-			end
-
-			if subsys.SecondaryBanks and type(ssdata.SBanks) == "table" then
-				ba.print("       Secondary Banks:\n")
-				for j, sbank in ipairs(ssdata.SBanks) do
-					ba.print("         Bank: " .. j .. "\n")
-					if type(sbank) == "table" and subsys.SecondaryBanks[j] then
-						local wclass = self:ResolveWeaponClass(sbank.Class, shipname, tostring(subsys.Name) .. " secondary bank " .. j)
-						if wclass then
-							subsys.SecondaryBanks[j] = wclass
-							ba.print("         Class: " .. tostring(sbank.Class) .. "\n")
-						end
-						if sbank.AmmoLeft and subsys.SecondaryAmmo then subsys.SecondaryAmmo[j] = self:GetAmmo(sbank.AmmoLeft,shipname) end
-					end
-				end
-			end
-		end
-
-	end
+	--Subsystem data (damage, armor, turret locks and turret banks) is deliberately NOT applied here. The parse object
+	--only lists the subsystems FRED wrote to the mission file, in file order, so it cannot be matched to the saved
+	--model-order list. ApplyLateData applies it by name once the ship has arrived and every subsystem is addressable.
+	ba.print("    Done with weapons... subsystem data will be applied on arrival\n")
 
 	if type(data.Position) == "table" then
 		local newPosition = ba.createVector(data.Position.x, data.Position.y, data.Position.z)
@@ -1125,7 +1118,6 @@ function SaveState:ApplyLateData(ship,data)
 
 	ba.print("SAVELOAD: Applying late data to " .. ship.Name .. "\n")
 
-	self:SanitizeShipData(data)
 	local shipname = data.Name or ship.Name
 
 	if data.HasBeenDestroyed then
@@ -1172,36 +1164,15 @@ function SaveState:ApplyLateData(ship,data)
 	
 	--Apply Ship Flags
 	ba.print("   Running SEXPs for ship flags...\n")
-	for i=1, #self.ShipFlags do
-		if data.Flags[i] then
-			local sexpstring = "(alter-ship-flag !" .. self.ShipFlags[i] .. "! (true) (true) !" .. ship.Name .. "! )"
-			ba.print(sexpstring .. "\n")
-			mn.runSEXP(sexpstring)
-		end
-	end
+	self:ApplyShipFlags(ship, data)
 
-	--Apply Turret Lock Status
-	
-	ba.print("    Applying Turret Locks (true = locked, false = free)\n")
-	
-	local numSubsys = #ship
-			
-	if numSubsys > 0 then
-		
-		for i=1, numSubsys do
-			local thisSubsys = ship[i]
-			local ssdata = data.Subsystems[i]
+	--Apply subsystem data (hitpoints, armor, turret locks, turret banks) by name, now that the ship is live
+	ba.print("   Applying subsystem data...\n")
+	self:ApplySubsystemData(ship, data, shipname)
 
-			if thisSubsys and thisSubsys:isValid() and thisSubsys:isTurret() then
-				if type(ssdata) == "table" and ssdata.TurretLocked ~= nil then
-					ba.print("      " .. thisSubsys:getModelName() .. ": " .. tostring(ssdata.TurretLocked) .. "\n")
-					thisSubsys.TurretLocked = ssdata.TurretLocked
-				else
-					ba.print("      " .. thisSubsys:getModelName() .. ": no saved lock state, skipping\n")
-				end
-			end
-		end
-	end
+	--Apply the ship's own weapon banks. This also covers ships whose parse object had no MainStatus.
+	ba.print("   Applying weapon bank data...\n")
+	self:ApplyShipBankData(ship, data, shipname)
 
 end
 
