@@ -25,6 +25,7 @@ function SaveState:Init()
 	
 	self.CurrentIndex = nil
 	self.WingList = {}
+	self.SupportShips = {}	--set of ship names identified as support ships while a live handle was available
 	self.List = self:GetAllCurrentShips()
 
 
@@ -72,6 +73,7 @@ function SaveState:GetAllCurrentShips()
 		if thisShip and thisShip:isValid() then
 			t[#t+1] = thisShip.Name
 			ba.print("SAVELOAD: Found " .. thisShip.Name .. ", adding to Ship List\n")
+			self:RecordSupportShip(thisShip)
 			if thisShip:getWing() and thisShip:getWing():isValid() then
 				self:AddWing(thisShip:getWing().Name)
 			end
@@ -92,13 +94,24 @@ function SaveState:AddShip(ship)
 
 	if self.Enabled then
 		self.List[#self.List+1] = ship.Name
+		self:RecordSupportShip(ship)
 		if ship:getWing() and ship:getWing():isValid() then
 			self:AddWing(ship:getWing().Name)
 		end
 	end
-	
+
 	if self.CurrentIndex then
 		self:CheckLateData(ship)
+	end
+
+end
+
+--Called wherever we have a live ship handle, so the support-ship decision can be made from the ship type rather than the name.
+function SaveState:RecordSupportShip(ship)
+
+	if self:IsSupportShipHandle(ship) then
+		ba.print("SAVELOAD: " .. ship.Name .. " is a support ship (by ship type), will be excluded from saves\n")
+		self.SupportShips[ship.Name] = true
 	end
 
 end
@@ -458,9 +471,16 @@ function SaveState:SaveAll(index, ...)
 	end
 		
 	for i, entry in ipairs(self.List) do
-		if (not self:CheckList(exclusionList,entry)) and (not self:IsSupportShip(entry)) then 
-			shipdata,key = self:GetShipData(entry)
-			data[key] = shipdata
+		if self:CheckList(exclusionList,entry) then
+			ba.print("SAVELOAD: Skipping " .. entry .. " (on exclusion list)\n")
+		else
+			local isSupport, route = self:IsSupportShip(entry)
+			if isSupport then
+				ba.print("SAVELOAD: Skipping " .. entry .. " (support ship, detected by " .. tostring(route) .. ")\n")
+			else
+				local shipdata, key = self:GetShipData(entry)
+				data[key] = shipdata
+			end
 		end
 	end
 	
@@ -1249,9 +1269,65 @@ function SaveState:StripFS2(s)
 
 end
 
+ --The engine's ship type (objecttypes.tbl) is the authoritative signal, and there is no class flag for it.
+function SaveState:IsSupportShipClass(class)
+
+	if not class or not class:isValid() then return false end
+
+	local shiptype = class.Type
+	if not shiptype or not shiptype:isValid() then return false end
+
+	return shiptype.Name:lower() == "support"
+
+end
+
+ --The decision is made while a live handle is available, because by save time the ship may already be gone;
+ --see IsSupportShip for the fallbacks. A ship handle and a parse object spell the class field differently.
+function SaveState:IsSupportShipHandle(ship)
+
+	if not ship or not ship:isValid() then return false end
+
+	return self:IsSupportShipClass(ship.Class)
+
+end
+
+function SaveState:IsSupportShipParseObject(parsed)
+
+	if not parsed or not parsed:isValid() then return false end
+
+	return self:IsSupportShipClass(parsed.ShipClass)
+
+end
+
+ --Returns true and the detection route ("type", "registry" or "prefix") when the named ship is a support ship.
 function SaveState:IsSupportShip(entry)
 
-	return entry:sub(1, #"Support") == "Support"
+	--Recorded from a live handle when the ship was added to the list
+	if self.SupportShips and self.SupportShips[entry] then
+		return true, "type"
+	end
+
+	--Try to resolve a handle now; covers ships added before SupportShips existed or a stale list entry
+	local regEntry = mn.ShipRegistry[entry]
+	if regEntry and regEntry:isValid() then
+		local ship = regEntry:getShip()
+		if ship and ship:isValid() then
+			if self:IsSupportShipHandle(ship) then return true, "registry" end
+			return false
+		end
+		local parsed = regEntry:getParsedShip()
+		if parsed and parsed:isValid() then
+			if self:IsSupportShipParseObject(parsed) then return true, "registry" end
+			return false
+		end
+	end
+
+	--Nothing resolvable (e.g. a ship-create'd support ship that has already died). Fall back to the engine naming convention.
+	if entry:sub(1, #"Support") == "Support" then
+		return true, "prefix"
+	end
+
+	return false
 
 end
 
