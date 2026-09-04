@@ -30,11 +30,9 @@ function SaveState:Init()
 
 
 	self.CuedList = {}
-		
-	local playerData = ba.getCurrentPlayer()
-	
-	self.SaveFilename = playerData:getName() .. "_" .. mn.getMissionFilename() .. ".sav"
-	
+
+	self.SaveFilename = self:SaveFilenameFor(mn.getMissionFilename())
+
 	if cf.fileExists(self.SaveFilename, "data/config") then
 		self.LoadedData = axemParse:ReadJSON(self.SaveFilename, "data/config")
 	else
@@ -1106,8 +1104,8 @@ function SaveState:ExternalLoad(index, mission, ...)
 
 	ba.print("SAVELOAD: Beginning External Load!\n")
 
-	if mission ~= self.ExternalMission then self:LoadExternalData(mission) end
-	
+	if self:NormalizeMissionName(mission) ~= self.ExternalMission then self:LoadExternalData(mission) end
+
 	local data = self.ExternalData
 	
 	if data and data[index] then
@@ -1134,7 +1132,7 @@ function SaveState:ExternalLoadVar(index, mission, ...)
 
 	ba.print("SAVELOAD: Beginning External Variable Load!\n")
 
-	if mission ~= self.ExternalMission then self:LoadExternalData(mission) end
+	if self:NormalizeMissionName(mission) ~= self.ExternalMission then self:LoadExternalData(mission) end
 
 	local data = self.ExternalData
 
@@ -1160,16 +1158,16 @@ function SaveState:ExternalLoadVar(index, mission, ...)
 
 end
 
+ --Takes the mission name as the FREDder wrote it, with or without the extension. The filename keeps that case;
+ --the cache key is the folded form, so callers compare with NormalizeMissionName.
 function SaveState:LoadExternalData(mission)
 
 	ba.print("SAVELOAD: Loading external data, " .. mission .. "\n")
 
-	local playerData = ba.getCurrentPlayer()
-	local tempmissionfilename = playerData:getName() .. "_" .. mission .. ".sav"
-	
-	self.ExternalMission = mission
-	
-	tempmissionfilename = self:StripFS2(tempmissionfilename)
+	local tempmissionfilename = self:SaveFilenameFor(mission)
+
+	self.ExternalMission = self:NormalizeMissionName(mission)
+
 	self.ExternalData = axemParse:ReadJSON(tempmissionfilename, "data/config")
 
 end
@@ -1184,7 +1182,7 @@ function SaveState:Exists(index, mission)
 	if not mission then
 		data = self.LoadedData
 	else
-		if mission ~= self.ExternalMission then self:LoadExternalData(mission) end
+		if self:NormalizeMissionName(mission) ~= self.ExternalMission then self:LoadExternalData(mission) end
 		data = self.ExternalData
 	end
 	
@@ -1259,13 +1257,33 @@ end
  --I TOLD them no .fs2 extension, but there's a chance they won't listen!
 function SaveState:StripFS2(s)
 
-	local pos = s:find(".fs2", -4, true)
+	if type(s) ~= "string" then return s end
+
+	local pos = s:lower():find(".fs2", -4, true)
 
 	if pos then
-		name = s:sub(1,pos-1)
+		return s:sub(1, pos-1)
 	end
-		
+
 	return s
+
+end
+
+ --The one place a save filename is built, so the name Init writes and the name LoadExternalData reads always agree.
+ --The case of the mission name is preserved, because this string reaches the filesystem and not every filesystem
+ --is case-insensitive; only the in-memory cache key is folded (see NormalizeMissionName).
+function SaveState:SaveFilenameFor(missionname)
+
+	return ba.getCurrentPlayer():getName() .. "_" .. self:StripFS2(missionname) .. ".sav"
+
+end
+
+ --Canonical form for COMPARING mission names. Never use this to build a filename.
+function SaveState:NormalizeMissionName(mission)
+
+	if type(mission) ~= "string" then return mission end
+
+	return self:StripFS2(mission):lower()
 
 end
 
