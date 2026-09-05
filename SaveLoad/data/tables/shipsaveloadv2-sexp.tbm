@@ -16,7 +16,7 @@ $Category: Change
 $Subcategory: Save/Load
 $Minimum Arguments: 1
 $Return Type: Nothing
-$Description: Saves one or more ships
+$Description: Saves one or more ships.  A ship that has not arrived yet is skipped, since it still has the attributes it was given in the mission file and there is nothing to restore.
 $Repeat
 $Parameter:
 	+Description: A ship
@@ -71,7 +71,7 @@ $Category: Change
 $Subcategory: Save/Load
 $Minimum Arguments: 2
 $Return Type: Nothing
-$Description: Loads one or more ships, causing them to instantly arrive if they are not present.
+$Description: Loads one or more ships, causing them to instantly arrive if they are not present.  A ship that had not arrived when the save was made has no saved data, so it will simply arrive with its mission settings.
 $Parameter:
 	+Description: Load type.  1 = hitpoints and weapon loadout$semicolon 2 = add weapon/afterburner/shield energy$semicolon 3 = add position and orientation.
 	+Type: number

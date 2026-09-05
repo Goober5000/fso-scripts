@@ -13,6 +13,10 @@ $On Game Init:
 	--definitions for savefile
 	ShipSave.path_shipsave = "data/scripts/"
 
+	--FSO 26.0 renamed the ship status enums and deprecated the old names, which raise an error in a mod that targets
+	--26.0 or later.  Prefer the new name where the build has it, and never mention the old one if it does.
+	ShipSave.status_not_yet_present = SHIP_STATUS_NOT_YET_PRESENT or NOT_YET_PRESENT
+
 	-- ================================================== --
 	-- sexp functions (public API)
 	-- ================================================== --
@@ -68,7 +72,14 @@ $On Game Init:
 
 	function ShipSave:load_ship(shipname, loadtype)
 		if shipname then
-			self:read_ship_from_string(shipname, self.shipsaveload_data.ships[shipname], loadtype)
+			local shipstring = self.shipsaveload_data.ships[shipname]
+			if not shipstring then
+				-- e.g. the ship was not saved at all, or had not arrived when the save was made, in which case it
+				-- still has its mission settings and there is nothing to restore
+				ba.print("SaveLoad: no save data for ship '" .. shipname .. "', nothing to load\n")
+				return
+			end
+			self:read_ship_from_string(shipname, shipstring, loadtype)
 		end
 	end
 	mn.LuaSEXPs["lua-load-ship"].Action = function(loadtype, ...)
@@ -80,7 +91,7 @@ $On Game Init:
 	function ShipSave:make_ship_arrive(shipname)
 		if shipname then
 			local entry = mn.ShipRegistry[shipname]
-			if entry and entry.Status == NOT_YET_PRESENT then
+			if entry and entry.Status == self.status_not_yet_present then
 				local parsed = entry:getParsedShip()
 				if parsed and parsed:isValid() then	-- if it's not valid, it's the support ship
 					local wing = parsed:getWing()
@@ -403,7 +414,15 @@ $On Game Init:
 			return nil
 		end
 
-		local ship = entry:getShip()		--ship handle; invalid if the ship has not arrived or has already left
+		-- A ship that has not arrived yet still holds exactly the attributes in the mission file, so there is nothing
+		-- to save.  Saving it would also be harmful: it would be recorded with the "vanished" status and then be
+		-- vanished on load if it had arrived by that point.
+		if entry.Status == self.status_not_yet_present then
+			ba.print("SaveLoad: ship '" .. shipname .. "' has not arrived yet, not saving\n")
+			return nil
+		end
+
+		local ship = entry:getShip()		--ship handle; invalid if the ship has already left
 		local shipdata = {}
 
 		if (ship and ship:isValid() and (ship:hasShipExploded() == 0)) then		--ship existent and not exploding
@@ -483,7 +502,7 @@ $On Game Init:
 			elseif (mn.evaluateSEXP("(has-departed-delay 0 !"..shipname.."!)")) then
 				shipdata[1][1] = -1		--ship departed
 			else
-				shipdata[1][1] = -3		--ship handle invalid, ship-vanish used or something like it
+				shipdata[1][1] = -3		--ship-vanish used or something like it (not-yet-arrived ships are filtered out above)
 			end
 		end
 		return self:createshipstring(shipdata)
