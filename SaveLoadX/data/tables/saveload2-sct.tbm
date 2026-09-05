@@ -1329,11 +1329,7 @@ function SaveState:QueryStatus(object, index)
 		saveData = slot
 	end
 
-	if type(saveData) ~= "table" then
-		return false
-	end
-
-	if type(saveData[object]) == "table" then
+	if type(saveData) == "table" and type(saveData[object]) == "table" then
 		if saveData[object].HasBeenDestroyed then
 			return false
 		elseif saveData[object].HasDeparted then
@@ -1342,8 +1338,10 @@ function SaveState:QueryStatus(object, index)
 			return true
 		end
 	end
-	
-	return false
+
+	--Not in the save state at all, which means it had not arrived when the checkpoint was taken.  The SEXP is
+	--documented as returning true for a ship that "is present or hasn't arrived", so it must be allowed to arrive.
+	return true
 
 end
 
