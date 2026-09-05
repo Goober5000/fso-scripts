@@ -156,8 +156,9 @@ function SaveState:GetShipData(shipname)
 				ba.print("   Wing: " .. tostring(t.Wing) .. "\n")
 			end
 			
-			--Get HP
-			t.HP = math.floor((ship.HitpointsLeft / ship.HitpointsMax) * 100)
+			--Get HP.  Round up: a living ship recorded as 0% would be restored with no hitpoints at all,
+			--either directly or through the parse object's InitialHull.
+			t.HP = math.ceil((ship.HitpointsLeft / ship.HitpointsMax) * 100)
 			ba.print("   HP: " .. tostring(t.HP) .. "\n")
 		
 			--Get Shields
