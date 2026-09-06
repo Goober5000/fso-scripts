@@ -13,6 +13,10 @@ $On Game Init:
 	--definitions for savefile
 	ShipSave.path_shipsave = "data/scripts/"
 
+	--FSO 26.0 renamed the ship status enums and deprecated the old names, which raise an error in a mod that targets
+	--26.0 or later.  Prefer the new name where the build has it, and never mention the old one if it does.
+	ShipSave.status_not_yet_present = SHIP_STATUS_NOT_YET_PRESENT or NOT_YET_PRESENT
+
 	-- ================================================== --
 	-- sexp functions (public API)
 	-- ================================================== --
@@ -68,7 +72,14 @@ $On Game Init:
 
 	function ShipSave:load_ship(shipname, loadtype)
 		if shipname then
-			self:read_ship_from_string(shipname, self.shipsaveload_data.ships[shipname], loadtype)
+			local shipstring = self.shipsaveload_data.ships[shipname]
+			if not shipstring then
+				-- e.g. the ship was not saved at all, or had not arrived when the save was made, in which case it
+				-- still has its mission settings and there is nothing to restore
+				ba.print("SaveLoad: no save data for ship '" .. shipname .. "', nothing to load\n")
+				return
+			end
+			self:read_ship_from_string(shipname, shipstring, loadtype)
 		end
 	end
 	mn.LuaSEXPs["lua-load-ship"].Action = function(loadtype, ...)
@@ -80,11 +91,11 @@ $On Game Init:
 	function ShipSave:make_ship_arrive(shipname)
 		if shipname then
 			local entry = mn.ShipRegistry[shipname]
-			if entry and entry.Status == NOT_YET_PRESENT then
+			if entry and entry.Status == self.status_not_yet_present then
 				local parsed = entry:getParsedShip()
-				if parsed:isValid() then	-- if it's not valid, it's the support ship
+				if parsed and parsed:isValid() then	-- if it's not valid, it's the support ship
 					local wing = parsed:getWing()
-					if wing:isValid() then
+					if wing and wing:isValid() then
 						if wing.TotalArrived == 0 then
 							wing.ArrivalLocation = "Hyperspace"
 							wing:setFlag(true, "no-arrival-warp", "no-arrival-music", "no-arrival-message")
@@ -123,9 +134,9 @@ $On Game Init:
 			self:read_ship_from_string(shipname2, str, loadtype)
 
 			local ship = mn.Ships[shipname1]
-			if ship:isValid() then
+			if ship and ship:isValid() then
 				local target = mn.Ships[shipname2]
-				if target:isValid() then
+				if target and target:isValid() then
 					target.Physics = ship.Physics
 				end
 			end
@@ -234,15 +245,17 @@ $On Game Init:
 
 		-- get the variables
 		local varline = file:read("*l")
-		if string.find(varline, "§") == 1 then
+		if varline and string.find(varline, "§") == 1 then
 			local tempb = self:split(varline, "§")
-			local varstrings = self:split(tempb[2], "&")
-			for i=1,#varstrings do
-				local vardata = self:split(varstrings[i], ",")
-				if #vardata ~= 3 then
-					ba.print("SaveLoad: could not split " .. varstrings[i] .. " into three tokens\n")
-				else
-					self.shipsaveload_data.variables[vardata[1]] = varstrings[i]
+			if tempb[2] and tempb[2] ~= "" then
+				local varstrings = self:split(tempb[2], "&")
+				for i=1,#varstrings do
+					local vardata = self:split(varstrings[i], ",")
+					if #vardata ~= 3 then
+						ba.print("SaveLoad: could not split " .. varstrings[i] .. " into three tokens\n")
+					else
+						self.shipsaveload_data.variables[vardata[1]] = varstrings[i]
+					end
 				end
 			end
 		else
@@ -290,17 +303,26 @@ $On Game Init:
 			return
 		end
 		local var = mn.SEXPVariables[varname]
-		if not var then
+		if not var or not var:isValid() then
 			ba.print("SaveLoad: target variable '"..varname.."' not found\n")
 			return
 		end
 		local arr = self:split(str, ",")
+		if #arr ~= 3 then
+			ba.print("SaveLoad: could not split '" .. str .. "' into three tokens; skipping variable '" .. varname .. "'\n")
+			return
+		end
 		if var.Type == SEXPVAR_TYPE_NUMBER then
 			if arr[2] ~= "n" then
 				ba.print("SaveLoad: variable type mismatch; source is string but target is numeric\n")
 				return
 			end
-			var.Value = tonumber(arr[3])
+			local num = tonumber(arr[3])
+			if num == nil then
+				ba.print("SaveLoad: value '" .. arr[3] .. "' for numeric variable '" .. varname .. "' is not a number; skipping\n")
+				return
+			end
+			var.Value = num
 		else
 			if arr[2] ~= "s" then
 				ba.print("SaveLoad: variable type mismatch; source is numeric but target is string\n")
@@ -350,6 +372,27 @@ $On Game Init:
 		return result
 	end
 
+	--parses a numeric field from the save file, logging and returning nil if it is not a number
+	function ShipSave:parsenumber(str, what)
+		local num = tonumber(str)
+		if num == nil then
+			ba.print("SaveLoad: " .. what .. " '" .. tostring(str) .. "' is not a number\n")
+		end
+		return num
+	end
+
+	--looks up a saved name in a game table, logging and returning nil if it no longer exists.
+	--note that a failed lookup yields an invalid handle rather than nil, unless the mod has opted into nil handles,
+	--so both cases have to be tested
+	function ShipSave:lookupname(gametable, name, shipname, what, keeping)
+		local handle = gametable[name]
+		if handle and handle:isValid() then
+			return handle
+		end
+		ba.print("SaveLoad: " .. tostring(shipname) .. ": saved " .. what .. " '" .. tostring(name) .. "' not found, keeping " .. keeping .. "\n")
+		return nil
+	end
+
 	function ShipSave:booltonum(val)
 		if val then
 			return 1
@@ -362,18 +405,35 @@ $On Game Init:
 		return val and (val ~= 0)
 	end
 
-	function ShipSave:shipdatacollect(shipname)		--shipdata collector function including string creation
-		local ship = mn.Ships[shipname]		--ship handle
+	function ShipSave:shipdatacollect(shipname)		--shipdata collector function including string creation; returns nil if the ship is unknown
+		-- Consult the ship registry first so that a name the mission does not know (e.g. a typo in FRED) is caught here
+		-- rather than being handed to the SEXP parser below
+		local entry = mn.ShipRegistry[shipname]
+		if not entry or not entry:isValid() then
+			ba.print("SaveLoad: ship '" .. tostring(shipname) .. "' is not in this mission, not saving\n")
+			return nil
+		end
+
+		-- A ship that has not arrived yet still holds exactly the attributes in the mission file, so there is nothing
+		-- to save.  Saving it would also be harmful: it would be recorded with the "vanished" status and then be
+		-- vanished on load if it had arrived by that point.
+		if entry.Status == self.status_not_yet_present then
+			ba.print("SaveLoad: ship '" .. shipname .. "' has not arrived yet, not saving\n")
+			return nil
+		end
+
+		local ship = entry:getShip()		--ship handle; invalid if the ship has already left
 		local shipdata = {}
 
-		if (ship:isValid() and (ship:hasShipExploded() == 0)) then		--ship existent and not exploding	
+		if (ship and ship:isValid() and (ship:hasShipExploded() == 0)) then		--ship existent and not exploding
 			local basicdata = {}
 			basicdata[1] = 1
 			basicdata[2] = ship.Class.Name		--ship class
 			basicdata[3] = ship.Team.Name			--team
 			basicdata[4] = ship.HitpointsMax		--user defined max hp
 			basicdata[5] = ship.HitpointsLeft		--hp left
-			if (ship.CountermeasureClass:isValid()) then
+			local cmeasure = ship.CountermeasureClass
+			if (cmeasure and cmeasure:isValid()) then
 				basicdata[6] = ship.CountermeasuresLeft
 			else
 				basicdata[6] = -1
@@ -389,7 +449,7 @@ $On Game Init:
 				basicdata[8] = -1
 			end
 			local shields = ship.Shields
-			if (shields:isValid()) then		--shield data in case there is a shield, otherwise -1
+			if (shields and shields:isValid()) then		--shield data in case there is a shield, otherwise -1
 				basicdata[9] = shields.CombinedMax
 				basicdata[10] = shields[1]
 				basicdata[11] = shields[2]
@@ -435,12 +495,14 @@ $On Game Init:
 			shipdata[4] = coords
 		else
 			shipdata[1] = {}
+			-- The registry status (EXITED) does not distinguish destroyed from departed, so the SEXPs are still needed
+			-- here; they are safe because the registry has confirmed the name exists
 			if (mn.evaluateSEXP("(is-destroyed-delay 0 !"..shipname.."!)")) then
 				shipdata[1][1] = -2		--ship destroyed
 			elseif (mn.evaluateSEXP("(has-departed-delay 0 !"..shipname.."!)")) then
 				shipdata[1][1] = -1		--ship departed
 			else
-				shipdata[1][1] = -3		--ship handle invalid, ship-vanish used or something like it
+				shipdata[1][1] = -3		--ship-vanish used or something like it (not-yet-arrived ships are filtered out above)
 			end
 		end
 		return self:createshipstring(shipdata)
@@ -448,12 +510,16 @@ $On Game Init:
 
 	function ShipSave:shipdataset(shipname, shipstring, loadtype)
 		local ship = mn.Ships[shipname]		--ship handle
-		if not ship:isValid() then
+		if not ship or not ship:isValid() then
 			-- nothing to do
 			return
 		end
 
 		local shipdata = self:shipstringsplitter(shipstring)		-- create shipdata array and fill it
+		if shipdata == nil then
+			ba.print("SaveLoad: skipping " .. shipname .. ", malformed save data\n")
+			return
+		end
 		local basicdata = shipdata[1]
 		local shipstatus = basicdata[1]
 
@@ -461,14 +527,31 @@ $On Game Init:
 		if shipstatus == 1 then
 			-- maybe change the ship class
 			local newclassname = basicdata[2]
-			if ship.Class.Name ~= newclassname then
-				mn.evaluateSEXP("(change-ship-class !"..newclassname.."! !"..shipname.."!)")
+			local class_matches = (ship.Class.Name == newclassname)
+			if not class_matches then
+				local newclass = self:lookupname(tb.ShipClasses, newclassname, shipname, "ship class", "current class")
+				if newclass then
+					-- the game looks classes up case-insensitively, so compare against the class's own name rather
+					-- than the saved string, which may differ from it in case
+					if ship.Class.Name == newclass.Name then
+						class_matches = true
+					else
+						mn.evaluateSEXP("(change-ship-class !"..newclassname.."! !"..shipname.."!)")
+						class_matches = (ship.Class.Name == newclass.Name)
+						if not class_matches then
+							ba.print("SaveLoad: " .. shipname .. ": could not change class to '" .. newclass.Name .. "'\n")
+						end
+					end
+				end
 			end
 
 			-- maybe change the ship team
 			local newteamname = basicdata[3]
 			if (ship.Team.Name ~= newteamname) then
-				mn.evaluateSEXP("(change-iff !"..newteamname.."! !"..shipname.."!)")
+				local newteam = self:lookupname(mn.Teams, newteamname, shipname, "team", "current team")
+				if newteam then
+					mn.evaluateSEXP("(change-iff !"..newteamname.."! !"..shipname.."!)")
+				end
 			end
 
 			ship.HitpointsMax = basicdata[4]
@@ -488,7 +571,7 @@ $On Game Init:
 				end
 
 				local shields = ship.Shields
-				if (shields:isValid() and (basicdata[9] > 0)) then		--ship has shields and save contains shields
+				if (shields and shields:isValid() and (basicdata[9] > 0)) then		--ship has shields and save contains shields
 					shields.CombinedMax = basicdata[9]
 					shields[1] = basicdata[10]
 					shields[2] = basicdata[11]
@@ -497,23 +580,38 @@ $On Game Init:
 				end
 			end
 
-			local arr_subsys = shipdata[2]
-			local n_subsystems = arr_subsys[1]
-			if (n_subsystems > 0) then		--ship has subsystems?
-				for i=1,n_subsystems do
-					if ship[i].HitpointsMax > 0 then
-						local hitpoints = arr_subsys[2*i]
-						if hitpoints > 0 then
-							ship[i].HitpointsLeft = hitpoints
-						else
-							mn.evaluateSEXP("(destroy-subsys-instantly !"..shipname.."! !"..ship[i]:getModelName().."!)")
+			-- Subsystems and weapon banks are stored by position within the ship class that was saved.  If this ship
+			-- is not that class, those positions refer to entirely different subsystems and banks, so applying the
+			-- data would damage or re-arm the wrong ones.  The scalar values above are not positional and are
+			-- deliberately still applied.
+			if not class_matches then
+				ba.print("SaveLoad: " .. shipname .. ": class does not match the save, skipping subsystem and weapon data\n")
+			else
+				local arr_subsys = shipdata[2]
+				local n_subsystems = arr_subsys[1]
+				if (n_subsystems > 0) then		--ship has subsystems?
+					local n_current = #ship
+					if n_subsystems ~= n_current then
+						ba.print("SaveLoad: " .. shipname .. ": saved subsystem count " .. n_subsystems .. " does not match current count " .. n_current .. ", applying what matches\n")
+					end
+					for i=1,math.min(n_subsystems, n_current) do
+						local subsys = ship[i]
+						if subsys and subsys:isValid() then
+							if subsys.HitpointsMax > 0 then
+								local hitpoints = arr_subsys[2*i]
+								if hitpoints > 0 then
+									subsys.HitpointsLeft = hitpoints
+								else
+									mn.evaluateSEXP("(destroy-subsys-instantly !"..shipname.."! !"..subsys:getModelName().."!)")
+								end
+							end
+							self:weaponsinsert(arr_subsys[2*i+1], subsys, 2, shipname)	--turrets loader, only primaries and secondaries
 						end
 					end
-					self:weaponsinsert(arr_subsys[2*i+1], ship[i], 2)	--turrets loader, only primaries and secondaries
 				end
-			end
 
-			self:weaponsinsert(shipdata[3], ship, 1)		--ships weapons, primaries, secondaries and tertiaries
+				self:weaponsinsert(shipdata[3], ship, 1, shipname)		--ships weapons, primaries, secondaries and tertiaries
+			end
 
 			-- type = 3
 			-- loads additionally to type = 2: position and orientation
@@ -557,7 +655,7 @@ $On Game Init:
 
 	function ShipSave:weaponbankdatacollect(bank)		--weaponbankdata to array
 		local array = {}
-		if (bank:isValid()) then
+		if (bank and bank:isValid()) then
 			local n = #bank		--number of weapons in bank
 			if (n > 0) then
 				array[1] = n
@@ -585,41 +683,77 @@ $On Game Init:
 		return array
 	end
 
-	function ShipSave:weaponsinsert(array,object,which_wep)		--transfers weapondata from array to object
-		local bank
+	function ShipSave:weaponsinsert(array,object,which_wep,shipname)		--transfers weapondata from array to object
 		if (array[1][1] > 0) then
-			bank=object.PrimaryBanks		--handle primaries
-			self:weaponbankinsert(bank,array[1],1)
+			self:weaponbankinsert(object.PrimaryBanks,array[1],shipname)		--handle primaries
 		end
 		if (array[2][1] > 0) then
-			bank=object.SecondaryBanks		--handle secondaries
-			self:weaponbankinsert(bank,array[2],2)
+			self:weaponbankinsert(object.SecondaryBanks,array[2],shipname)		--handle secondaries
 		end
 		if ((which_wep == 1) and (array[3][1] > 0)) then		--1=main weapons, 2=turrets
-			bank=object.TertiaryBanks
-			self:weaponbankinsert(bank,array[3],0)
+			self:weaponbankinsert(object.TertiaryBanks,array[3],shipname)
 		end
 	end
 
-	function ShipSave:weaponbankinsert(bank,array,which_wep)		--array to weaponbankdata
-		if (bank:isValid()) then
-			bank.Linked = self:numtobool(array[2])		--linked
-			bank.DualFire = self:numtobool(array[3])		--dual fire
-			local n = array[1]
-			for j=1,n do
-				local wbank=bank[j] 	--weaponbank handle
-				local weapon = array[3+j]
-				if (wbank.WeaponClass.Name ~= weapon[1]) then		--prevent it from doing unnecessary stuff
-					wbank.WeaponClass = tb.WeaponClasses[weapon[1]]		--weapon class
+	--writes the saved ammunition into a bank.  Only call this once the bank actually holds the saved weapon class,
+	--since AmmoMax is scaled by the cargo size of whatever weapon is mounted.
+	function ShipSave:setbankammo(wbank,weapon)
+		local wclass = wbank.WeaponClass
+		if not wclass or not wclass:isValid() then
+			return
+		end
+		-- NOTE: see the documentation on the AmmoMax virtvar in the FSO code.  Setting what you get is not idempotent.
+		wbank.AmmoMax = weapon[3] * wclass.CargoSize
+		if (weapon[3] > 0) then
+			wbank.AmmoLeft = weapon[4]
+		end
+	end
+
+	function ShipSave:weaponbankinsert(bank,array,shipname)		--array to weaponbankdata
+		if not bank or not bank:isValid() then
+			return
+		end
+		bank.Linked = self:numtobool(array[2])		--linked
+		bank.DualFire = self:numtobool(array[3])		--dual fire
+		local n = array[1]
+		local n_current = #bank
+		if n ~= n_current then
+			ba.print("SaveLoad: " .. tostring(shipname) .. ": saved weapon count " .. n .. " does not match current bank size " .. n_current .. ", applying what matches\n")
+		end
+		for j=1,math.min(n, n_current) do
+			local wbank=bank[j] 	--weaponbank handle
+			local weapon = array[3+j]
+			if wbank and wbank:isValid() then
+				local current = wbank.WeaponClass
+				local currentname = ""
+				if current and current:isValid() then
+					currentname = current.Name
 				end
+
+				if weapon[1] == "" then
+					-- the bank slot held no weapon when the ship was saved.  There is no way to empty a bank
+					-- through the scripting API, so leave the slot alone rather than mis-scaling its ammunition.
+
+				elseif (currentname == weapon[1]) then		--prevent it from doing unnecessary stuff
+					self:setbankammo(wbank,weapon)
+
+				else
+					local keeping = "the empty bank"
+					if currentname ~= "" then
+						keeping = "'" .. currentname .. "'"
+					end
+					local wclass = self:lookupname(tb.WeaponClasses, weapon[1], shipname, "weapon class", keeping)
+					if wclass then
+						wbank.WeaponClass = wclass		--weapon class
+						self:setbankammo(wbank,weapon)
+					end
+					-- if the class could not be applied, the saved ammunition belongs to a different weapon and
+					-- would be scaled by the wrong cargo size, so it is skipped
+				end
+
 				local b_armed = self:numtobool(weapon[2])
 				if b_armed then
 					wbank.Armed = b_armed						--weapon active
-				end
-				-- NOTE: see the documentation on the AmmoMax virtvar in the FSO code.  Setting what you get is not idempotent.
-				wbank.AmmoMax = weapon[3] * wbank.WeaponClass.CargoSize
-				if (weapon[3] > 0) then
-					wbank.AmmoLeft = weapon[4]
 				end
 			end
 		end
@@ -678,61 +812,122 @@ $On Game Init:
 		return savestring
 	end
 
-	function ShipSave:shipstringsplitter(shipstring)		--splits shipstring into shipdata array
-		local _tonumber = tonumber
+	function ShipSave:shipstringsplitter(shipstring)		--splits shipstring into shipdata array; returns nil if the string is malformed
+		if type(shipstring) ~= "string" or shipstring == "" then
+			ba.print("SaveLoad: ship data is empty\n")
+			return nil
+		end
 		local shipdata = {}
 
 		local temp = self:split(shipstring,":")
-		shipdata[1] = {}
 		shipdata[1] = self:split(temp[1],",")
-		shipdata[1][1] = _tonumber(shipdata[1][1])		--need something like (if string = a number then change string to number) in the split function
+		shipdata[1][1] = self:parsenumber(shipdata[1][1], "ship status code")
+		if shipdata[1][1] == nil then
+			return nil
+		end
 		if (shipdata[1][1] == 1) then
+			if #temp < 4 then
+				ba.print("SaveLoad: ship data has " .. #temp .. " sections, expected 4\n")
+				return nil
+			end
+			if #shipdata[1] < 13 then
+				ba.print("SaveLoad: ship basic data has " .. #shipdata[1] .. " fields, expected at least 13\n")
+				return nil
+			end
 			for m=4,13 do
-				shipdata[1][m] = _tonumber(shipdata[1][m])
+				shipdata[1][m] = self:parsenumber(shipdata[1][m], "ship basic data field " .. m)
+				if shipdata[1][m] == nil then
+					return nil
+				end
 			end
 
 			shipdata[2] = {}
 			local subtemp = self:split(temp[2],"&")
-			local n_subsystems = _tonumber(subtemp[1])
+			local n_subsystems = self:parsenumber(subtemp[1], "subsystem count")
+			if n_subsystems == nil then
+				return nil
+			end
 			shipdata[2][1] = n_subsystems
 			if (n_subsystems > 0) then
 				for i=1,n_subsystems do
+					if subtemp[i+1] == nil then
+						ba.print("SaveLoad: subsystem data lists " .. n_subsystems .. " subsystems but only " .. (i-1) .. " are present\n")
+						return nil
+					end
 					local subtempint = self:split(subtemp[i+1],"§")
-					shipdata[2][2*i] = _tonumber(subtempint[1])
+					if subtempint[2] == nil then
+						ba.print("SaveLoad: subsystem " .. i .. " data '" .. subtemp[i+1] .. "' is malformed\n")
+						return nil
+					end
+					local hitpoints = self:parsenumber(subtempint[1], "subsystem " .. i .. " hitpoints")
+					if hitpoints == nil then
+						return nil
+					end
+					shipdata[2][2*i] = hitpoints
 					shipdata[2][2*i+1] = self:weaponstringsplitter(subtempint[2])
+					if shipdata[2][2*i+1] == nil then
+						return nil
+					end
 				end
 			end
 
 			shipdata[3] = self:weaponstringsplitter(temp[3])
+			if shipdata[3] == nil then
+				return nil
+			end
 
+			-- createshipstring writes 18 fields here (position, orientation, velocity and rotational velocity)
+			-- but only the first 12 are ever consumed on load, so only those are validated
 			shipdata[4] = self:split(temp[4],",")
+			if #shipdata[4] < 12 then
+				ba.print("SaveLoad: position data has " .. #shipdata[4] .. " fields, expected at least 12\n")
+				return nil
+			end
 			for m=1,12 do
-				shipdata[4][m] = _tonumber(shipdata[4][m])
+				shipdata[4][m] = self:parsenumber(shipdata[4][m], "position data field " .. m)
+				if shipdata[4][m] == nil then
+					return nil
+				end
 			end
 		end
 		return shipdata
 	end
 
-	function ShipSave:weaponstringsplitter(subtempint)		--splits weapondata into array
-		local _tonumber = tonumber
+	function ShipSave:weaponstringsplitter(subtempint)		--splits weapondata into array; returns nil if the string is malformed
+		if type(subtempint) ~= "string" then
+			ba.print("SaveLoad: weapon data is missing\n")
+			return nil
+		end
 		local array = {}
 		local pos = 1
 
 		local temp = self:split(subtempint,",")
 		for j=1,3 do
 			local weaponbank = {}
-			local n = _tonumber(temp[pos])
+			local n = self:parsenumber(temp[pos], "weapon bank " .. j .. " count")
+			if n == nil then
+				return nil
+			end
 			weaponbank[1] = n								--number
 			if (n > 0) then
-				weaponbank[2] = _tonumber(temp[pos+1])		--linked
-				weaponbank[3] = _tonumber(temp[pos+2])		--dualfire
+				weaponbank[2] = self:parsenumber(temp[pos+1], "weapon bank " .. j .. " linked flag")		--linked
+				weaponbank[3] = self:parsenumber(temp[pos+2], "weapon bank " .. j .. " dual-fire flag")	--dualfire
+				if weaponbank[2] == nil or weaponbank[3] == nil then
+					return nil
+				end
 				pos = pos + 3
 				for k=1,n do
 					local weapon = {}
+					-- an empty class name is legitimate: it means the bank slot held no weapon when the ship was
+					-- saved, which is what WeaponClass.Name returns for an emptied bank
 					weapon[1] = temp[pos]					--weapon class name
-					weapon[2] = _tonumber(temp[pos+1])		--weapon active
-					weapon[3] = _tonumber(temp[pos+2])		--max ammo
-					weapon[4] = _tonumber(temp[pos+3])		--ammo remaining
+					weapon[2] = self:parsenumber(temp[pos+1], "weapon " .. k .. " in bank " .. j .. " armed flag")
+					weapon[3] = self:parsenumber(temp[pos+2], "weapon " .. k .. " in bank " .. j .. " max ammo")
+					weapon[4] = self:parsenumber(temp[pos+3], "weapon " .. k .. " in bank " .. j .. " ammo remaining")
+					if weapon[1] == nil or weapon[2] == nil or weapon[3] == nil or weapon[4] == nil then
+						ba.print("SaveLoad: weapon " .. k .. " in bank " .. j .. " is malformed\n")
+						return nil
+					end
 					weaponbank[k+3] = weapon
 					pos = pos + 4
 				end
